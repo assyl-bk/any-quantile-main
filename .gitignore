@@ -1,8 +1,32 @@
+# Data files
 data/
-*ipynb_checkpoints*
-*__pycache__*
-lightning_logs/ 
 
+# Jupyter
+*ipynb_checkpoints*
+
+# Python cache
+*__pycache__*
+*.py[cod]
+*.so
+
+# Training logs and checkpoints
+lightning_logs/
+logs/
+*.ckpt
+
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
 
 
 
