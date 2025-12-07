@@ -24,6 +24,12 @@ def run(cfg_yaml):
     cfg = OmegaConf.create(cfg)
     
     print(OmegaConf.to_yaml(cfg))
+
+    # Fallback to CPU if CUDA is unavailable even when config requests GPU.
+    if (cfg.trainer.get("accelerator") == "gpu") and (not torch.cuda.is_available()):
+        cfg.trainer.accelerator = "cpu"
+        cfg.trainer.devices = 1
+        logging.warning("CUDA not available; overriding trainer.accelerator to 'cpu'.")
     
     logger = TensorBoardLogger(save_dir=cfg.logging.path, version=cfg.logging.name, name="")    
     

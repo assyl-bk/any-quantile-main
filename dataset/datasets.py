@@ -16,6 +16,8 @@ import bisect
 import subprocess
 from glob import glob
 import logging
+import shutil
+import zipfile
 
 import contextlib
 
@@ -202,7 +204,21 @@ class ElectricityUnivariateDataModule(pl.LightningDataModule):
     def prepare_data():
         logger.info("Downloading datasets")
         datasets_path = "data/electricity/datasets/"
-        pathlib.Path(datasets_path).mkdir(parents=True, exist_ok=True)
+        datasets_root = pathlib.Path(datasets_path)
+        datasets_root.mkdir(parents=True, exist_ok=True)
+
+        # If data is already present locally, skip download to avoid external deps (gsutil/unzip).
+        existing_csvs = list(datasets_root.glob("**/df_y.csv"))
+        if len(existing_csvs) > 0:
+            logger.info("Found local dataset files, skipping download.")
+            return
+
+        # Require gsutil only when data is missing.
+        if shutil.which("gsutil") is None:
+            raise FileNotFoundError(
+                "gsutil not found. Install Google Cloud SDK or place datasets under data/electricity/datasets."
+            )
+
         proc = subprocess.run(["gsutil", "-m", "rsync", "gs://electricity-datasets", datasets_path],
                               capture_output=True)
         logger.info(proc.stderr.decode())
@@ -210,8 +226,13 @@ class ElectricityUnivariateDataModule(pl.LightningDataModule):
 
         logger.info("Unzipping datasets")
         for d in datasets:
-            proc = subprocess.run(["unzip", "-u", d], capture_output=True)
-            logger.info(proc.stdout.decode())
+            try:
+                with zipfile.ZipFile(d, "r") as zf:
+                    zf.extractall(datasets_path)
+            except zipfile.BadZipFile:
+                # Fall back to system unzip if the file is not a valid zip; this keeps legacy behavior.
+                proc = subprocess.run(["unzip", "-u", d], capture_output=True)
+                logger.info(proc.stdout.decode())
 
     def setup(self, stage: str):
         # Assign train/val datasets for use in dataloaders
@@ -575,3 +596,63 @@ class LongHorizonUnivariateDataModule(pl.LightningDataModule):
                           shuffle=False, pin_memory=True, 
                           persistent_workers=self.persistent_workers,
                           num_workers=self.num_workers, collate_fn=collate_fn_flat_deal)
+class ElectricityWithExogDataset(ElectricityUnivariateDataset):
+    """Extended dataset with exogenous features support"""
+    def __init__(
+        self,
+        name: str,
+        split: str,
+        exog_features: List[str] = ['temperature', 'humidity'],
+        calendar_features: bool = True,
+        **kwargs
+    ):
+        super().__init__(name, split, **kwargs)
+        
+        self.exog_features = exog_features
+        self.calendar_features = calendar_features
+
+        # Load exogenous data (aligned with time series)
+        if self.exog_features:
+            exog_path = f'./data/exogenous/{name.lower()}_weather.csv'
+            self.exog_df = pd.read_csv(exog_path, parse_dates=['ds'])
+            self.exog_df = self.exog_df.set_index('ds')
+        else:
+            self.exog_df = None
+
+    def _get_calendar_features(self, timestamps):
+        """Generate calendar embeddings"""
+        hour = timestamps.hour / 24.0
+        dow = timestamps.dayofweek / 7.0
+        month = (timestamps.month - 1) / 12.0
+        is_weekend = (timestamps.dayofweek >= 5).astype(float)
+
+        return np.stack([hour, dow, month, is_weekend], axis=-1)
+
+    def __getitem__(self, index):
+        # Base item (contains history & target)
+        item = super().__getitem__(index)
+
+        # Extract window start from parent class
+        window_idx = item["window_start"]   # Make sure this exists in parent
+
+        # Get timestamps for this window
+        window_times = self.series_timestamps[
+            window_idx : window_idx + self.tot_window_len
+        ]
+
+        # ---------------------------
+        # Add exogenous features
+        # ---------------------------
+        if self.exog_features and self.exog_df is not None:
+            exog = self.exog_df.loc[window_times][self.exog_features].values
+            
+            item['exog_history'] = exog[: self.history_length].astype(np.float32)
+            item['exog_future'] = exog[self.history_length :].astype(np.float32)
+
+        # ---------------------------
+        # Add calendar features
+        # ---------------------------
+        if self.calendar_features:
+            item['calendar'] = self._get_calendar_features(window_times)
+
+        return item

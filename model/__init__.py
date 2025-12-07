@@ -1,3 +1,11 @@
-from .models import MlpForecaster, GeneralForecaster, AnyQuantileForecaster, GeneralAnyQuantileForecaster, AnyQuantileForecasterLog
+from .models import (
+    MlpForecaster,
+    AnyQuantileForecaster,
+    AnyQuantileForecasterWithMonotonicity
+)
 
-__all__ = ['MlpForecaster', 'GeneralForecaster', 'AnyQuantileForecaster', 'GeneralAnyQuantileForecaster', 'AnyQuantileForecasterLog']
+__all__ = [
+    'MlpForecaster',
+    'AnyQuantileForecaster',
+    'AnyQuantileForecasterWithMonotonicity'
+]

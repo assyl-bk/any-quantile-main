@@ -28,7 +28,11 @@ class InverseSquareRoot(_LRScheduler):
         # initial learning rate
         self.lr = warmup_init_lr        
         
-        super(InverseSquareRoot, self).__init__(optimizer, last_epoch, verbose)
+        # Older torch versions do not support the verbose argument; fall back when needed.
+        try:
+            super(InverseSquareRoot, self).__init__(optimizer, last_epoch, verbose)
+        except TypeError:
+            super(InverseSquareRoot, self).__init__(optimizer, last_epoch)
 
     def get_lr(self):
         """Update the learning rate after each update."""

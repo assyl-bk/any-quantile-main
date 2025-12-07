@@ -13,6 +13,7 @@ from torchmetrics import MeanSquaredError, MeanAbsoluteError
 from metrics import SMAPE, MAPE, CRPS, Coverage
 
 from modules import MLP
+from losses import MonotonicityLoss
     
     
 class MlpForecaster(pl.LightningModule):
@@ -39,9 +40,6 @@ class MlpForecaster(pl.LightningModule):
         
     def shared_forward(self, x):
         history = x['history'][:, -self.cfg.model.input_horizon_len:]
-
-        
-        
         forecast = self.backbone(history)   
         return {'forecast': forecast}
 
@@ -51,28 +49,22 @@ class MlpForecaster(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         net_output = self.shared_forward(batch)
-        
         y_hat = net_output['forecast']
-        
         loss = self.loss(y_hat, batch['target']) 
         
         batch_size=batch['history'].shape[0]
         self.log("train/loss", loss, on_step=True, on_epoch=True, 
                  prog_bar=True, logger=True, batch_size=batch_size)
-        
         self.train_mse(y_hat, batch['target'])
         self.log("train/mse", self.train_mse, on_step=False, on_epoch=True, 
                  prog_bar=True, logger=True, batch_size=batch_size)
-        
         self.train_mae(y_hat, batch['target'])
         self.log("train/mae", self.train_mae, on_step=False, on_epoch=True, 
                  prog_bar=False, logger=True, batch_size=batch_size)
-        
         return loss
     
     def validation_step(self, batch, batch_idx):
         net_output = self.shared_forward(batch)
-        
         y_hat = net_output['forecast']
         
         self.val_mse(y_hat, batch['target'])
@@ -89,7 +81,6 @@ class MlpForecaster(pl.LightningModule):
         
     def test_step(self, batch, batch_idx):
         net_output = self.shared_forward(batch)
-        
         y_hat = net_output['forecast']
         
         self.test_mse(y_hat, batch['target'])
@@ -136,7 +127,6 @@ class AnyQuantileForecaster(MlpForecaster):
         if self.cfg.model.max_norm:
             x_max[x_max == 0] = 1
         else:
-            # If norm is disabled, set all values to 1
             x_max[x_max >= 0] = 1
         history = history / x_max
         
@@ -148,7 +138,6 @@ class AnyQuantileForecaster(MlpForecaster):
         return out['forecast']
 
     def training_step(self, batch, batch_idx):
-        # generate random quantiles
         batch_size = batch['history'].shape[0]
         if self.cfg.model.q_sampling == 'fixed_in_batch':
             q = torch.rand(1)
@@ -160,14 +149,13 @@ class AnyQuantileForecaster(MlpForecaster):
                 batch['quantiles'] = torch.Tensor(np.random.beta(self.cfg.model.q_parameter, self.cfg.model.q_parameter, 
                                                                  size=(batch_size, 1))).to(batch['history'])
             else:
-                assert False, f"Option {self.cfg.model.q_distribution} is not implemented for model.q_distribution"
+                assert False, f"Option {self.cfg.model.q_distribution} is not implemented"
         else:
-            assert False, f"Option {self.cfg.model.q_sampling} is not implemented for model.q_sampling"
+            assert False, f"Option {self.cfg.model.q_sampling} is not implemented"
         
         net_output = self.shared_forward(batch)
-        
-        y_hat = net_output['forecast'] # BxHxQ
-        quantiles = net_output['quantiles'][:,None] # Bx1xQ
+        y_hat = net_output['forecast']
+        quantiles = net_output['quantiles'][:,None]
         center_idx = y_hat.shape[-1]
         assert center_idx % 2 == 1, "Number of quantiles must be odd"
         center_idx = center_idx // 2
@@ -177,27 +165,23 @@ class AnyQuantileForecaster(MlpForecaster):
         batch_size=batch['history'].shape[0]
         self.log("train/loss", loss, on_step=True, on_epoch=True, 
                  prog_bar=True, logger=True, batch_size=batch_size)
-        
         self.train_mse(y_hat[..., center_idx], batch['target'])
         self.log("train/mse", self.train_mse, on_step=False, on_epoch=True, 
                  prog_bar=True, logger=True, batch_size=batch_size)
-        
         self.train_mae(y_hat[..., center_idx], batch['target'])
         self.log("train/mae", self.train_mae, on_step=False, on_epoch=True, 
                  prog_bar=False, logger=True, batch_size=batch_size)
-        
         self.train_crps(y_hat, batch['target'], q=quantiles)
         self.log("train/crps", self.train_crps, on_step=False, on_epoch=True, 
                  prog_bar=False, logger=True, batch_size=batch_size)
-        
         return loss
     
     def validation_step(self, batch, batch_idx):
         batch['quantiles'] = self.val_coverage.add_evaluation_quantiles(batch['quantiles'])
         net_output = self.shared_forward(batch)
         
-        y_hat = net_output['forecast'] # BxHxQ
-        quantiles = net_output['quantiles'][:,None] # Bx1xQ
+        y_hat = net_output['forecast']
+        quantiles = net_output['quantiles'][:,None]
         
         self.val_mse(y_hat[..., 0].contiguous(), batch['target'])
         self.val_mae(y_hat[..., 0].contiguous(), batch['target'])
@@ -224,14 +208,15 @@ class AnyQuantileForecaster(MlpForecaster):
         batch['quantiles'] = self.test_coverage.add_evaluation_quantiles(batch['quantiles'])
         net_output = self.shared_forward(batch)
         
-        y_hat = net_output['forecast'] # BxHxQ
-        quantiles = net_output['quantiles'][:,None] # Bx1xQ
+        y_hat = net_output['forecast']
+        quantiles = net_output['quantiles'][:,None]
         
         self.test_mse(y_hat[..., 0].contiguous(), batch['target'])
         self.test_mae(y_hat[..., 0].contiguous(), batch['target'])
         self.test_smape(y_hat[..., 0].contiguous(), batch['target'])
         self.test_mape(y_hat[..., 0].contiguous(), batch['target'])
         self.test_crps(y_hat, batch['target'], q=quantiles)
+        self.test_coverage(y_hat, batch['target'], q=quantiles)
                 
         batch_size=batch['history'].shape[0]
         self.log("test/mse", self.test_mse, on_step=False, on_epoch=True, 
@@ -244,165 +229,100 @@ class AnyQuantileForecaster(MlpForecaster):
                  prog_bar=False, logger=True, batch_size=batch_size)
         self.log("test/crps", self.test_crps, on_step=False, on_epoch=True, 
                  prog_bar=False, logger=True, batch_size=batch_size)
-        self.log(f"test/coverage-{self.test_coverage.level}", self.val_coverage, on_step=False, on_epoch=True, 
+        self.log(f"test/coverage-{self.test_coverage.level}", self.test_coverage, on_step=False, on_epoch=True, 
                  prog_bar=False, logger=True, batch_size=batch_size)
 
 
-class AnyQuantileForecasterLog(AnyQuantileForecaster):
-
-    def shared_forward(self, x):
-        x['history'] = torch.log(1 + x['history'])
-        output = super().shared_forward(x)
-        output['forecast_exp'] = torch.exp(output['forecast']) - 1.0
-        return output
+class AnyQuantileForecasterWithMonotonicity(AnyQuantileForecaster):
+    """Any-Quantile Forecaster with Monotonicity Constraint"""
+    
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.use_monotonicity_loss = cfg.model.get('use_monotonicity_loss', False)
+        self.monotone_weight = cfg.model.get('monotone_weight', 0.1)
+        self.monotone_margin = cfg.model.get('monotone_margin', 0.0)
+        
+    def monotonicity_loss(self, y_hat, quantiles):
+        """
+        Enforce that predictions for higher quantiles are >= predictions for lower quantiles
+        y_hat: BxHxQ
+        quantiles: Bx1xQ
+        """
+        # Sort by quantile values
+        sorted_indices = torch.argsort(quantiles, dim=-1)
+        sorted_y_hat = torch.gather(y_hat, -1, sorted_indices.expand_as(y_hat))
+        
+        # Compute differences between consecutive quantiles
+        diffs = sorted_y_hat[..., 1:] - sorted_y_hat[..., :-1]
+        
+        # Penalize negative differences (violations)
+        violations = F.relu(self.monotone_margin - diffs)
+        return violations.mean()
     
     def training_step(self, batch, batch_idx):
-        # generate random quantiles
+        # Generate random quantiles
         batch_size = batch['history'].shape[0]
-        if self.cfg.model.q_sampling == 'fixed_in_batch':
-            q = torch.rand(1)
-            batch['quantiles'] = (q * torch.ones(batch_size, 1)).to(batch['history'])
-        elif self.cfg.model.q_sampling == 'random_in_batch':
-            batch['quantiles'] = torch.rand(batch_size, 1).to(batch['history'])
+        num_quantiles = self.cfg.model.get('num_train_quantiles', 1)
+        
+        if self.cfg.model.q_sampling == 'random_in_batch':
+            if self.cfg.model.q_distribution == 'uniform':
+                batch['quantiles'] = torch.rand(batch_size, num_quantiles).to(batch['history'])
+            elif self.cfg.model.q_distribution == 'beta':
+                batch['quantiles'] = torch.Tensor(np.random.beta(
+                    self.cfg.model.q_parameter, 
+                    self.cfg.model.q_parameter, 
+                    size=(batch_size, num_quantiles)
+                )).to(batch['history'])
+            else:
+                assert False, f"Option {self.cfg.model.q_distribution} not implemented"
         else:
-            assert False, f"Option {self.cfg.model.q_sampling} is not implemented for model.q_sampling"
-        # batch['quantiles'] = torch.rand(batch['history'].shape[0], 1).to(batch['history'])
-        # batch['quantiles'] = (torch.rand(1) * torch.ones(batch['history'].shape[0], 1)).to(batch['history'])
+            assert False, f"Option {self.cfg.model.q_sampling} not implemented"
         
         net_output = self.shared_forward(batch)
         
-        y_hat = net_output['forecast'] # BxHxQ
-        quantiles = net_output['quantiles'][:,None] # Bx1xQ
-        y_hat_exp = net_output['forecast_exp'] # BxHxQ
+        y_hat = net_output['forecast']  # BxHxQ
+        quantiles = net_output['quantiles'][:, None]  # Bx1xQ
         
-        loss = self.loss(y_hat, torch.log(batch['target'] + 1), q=quantiles) 
+        # Main quantile loss
+        main_loss = self.loss(y_hat, batch['target'], q=quantiles)
         
-        batch_size=batch['history'].shape[0]
+        # Add monotonicity loss if enabled
+        if self.use_monotonicity_loss and num_quantiles > 1:
+            mono_loss = self.monotonicity_loss(y_hat, quantiles)
+            loss = main_loss + self.monotone_weight * mono_loss
+            
+            self.log("train/mono_loss", mono_loss, on_step=False, on_epoch=True, 
+                     prog_bar=False, logger=True, batch_size=batch_size)
+        else:
+            loss = main_loss
+        
+        batch_size = batch['history'].shape[0]
         self.log("train/loss", loss, on_step=True, on_epoch=True, 
                  prog_bar=True, logger=True, batch_size=batch_size)
         
-        self.train_mse(y_hat_exp[..., 0], batch['target'])
+        # Metrics on median quantile
+        median_idx = num_quantiles // 2
+        self.train_mse(y_hat[..., median_idx], batch['target'])
         self.log("train/mse", self.train_mse, on_step=False, on_epoch=True, 
                  prog_bar=True, logger=True, batch_size=batch_size)
         
-        self.train_mae(y_hat_exp[..., 0], batch['target'])
+        self.train_mae(y_hat[..., median_idx], batch['target'])
         self.log("train/mae", self.train_mae, on_step=False, on_epoch=True, 
                  prog_bar=False, logger=True, batch_size=batch_size)
         
-        self.train_crps(y_hat_exp, batch['target'], q=quantiles)
+        self.train_crps(y_hat, batch['target'], q=quantiles)
         self.log("train/crps", self.train_crps, on_step=False, on_epoch=True, 
                  prog_bar=False, logger=True, batch_size=batch_size)
         
         return loss
     
-    def validation_step(self, batch, batch_idx):
-        batch['quantiles'] = self.val_coverage.add_evaluation_quantiles(batch['quantiles'])
-        net_output = self.shared_forward(batch)
-        
-        y_hat = net_output['forecast'] # BxHxQ
-        quantiles = net_output['quantiles'][:,None] # Bx1xQ
-        y_hat_exp = net_output['forecast_exp'] # BxHxQ
-        
-        self.val_mse(y_hat_exp[..., 0], batch['target'])
-        self.val_mae(y_hat_exp[..., 0], batch['target'])
-        self.val_smape(y_hat_exp[..., 0], batch['target'])
-        self.val_crps(y_hat_exp, batch['target'], q=quantiles)
-        self.val_coverage(y_hat_exp, batch['target'], q=quantiles)
-                
-        batch_size=batch['history'].shape[0]
-        self.log("val/mse", self.val_mse, on_step=False, on_epoch=True, 
-                 prog_bar=True, logger=True, batch_size=batch_size)
-        self.log("val/mae", self.val_mae, on_step=False, on_epoch=True, 
-                 prog_bar=False, logger=True, batch_size=batch_size)
-        self.log("val/smape", self.val_smape, on_step=False, on_epoch=True, 
-                 prog_bar=False, logger=True, batch_size=batch_size)
-        self.log("val/crps", self.val_crps, on_step=False, on_epoch=True, 
-                 prog_bar=False, logger=True, batch_size=batch_size)
-        self.log(f"val/coverage-{self.val_coverage.level}", self.val_coverage, on_step=False, on_epoch=True, 
-                 prog_bar=False, logger=True, batch_size=batch_size)
-        
-    def test_step(self, batch, batch_idx):
-        batch['quantiles'] = self.test_coverage.add_evaluation_quantiles(batch['quantiles'])
-        net_output = self.shared_forward(batch)
-        
-        y_hat = net_output['forecast'] # BxHxQ
-        quantiles = net_output['quantiles'][:,None] # Bx1xQ
-        y_hat_exp = net_output['forecast_exp'] # BxHxQ
-                
-        self.test_mse(y_hat_exp[..., 0], batch['target'])
-        self.test_mae(y_hat_exp[..., 0], batch['target'])
-        self.test_smape(y_hat_exp[..., 0], batch['target'])
-        self.test_mape(y_hat_exp[..., 0], batch['target'])
-        self.test_crps(y_hat_exp, batch['target'], q=quantiles)
-                
-        batch_size=batch['history'].shape[0]
-        self.log("test/mse", self.test_mse, on_step=False, on_epoch=True, 
-                 prog_bar=True, logger=True, batch_size=batch_size)
-        self.log("test/mae", self.test_mae, on_step=False, on_epoch=True, 
-                 prog_bar=False, logger=True, batch_size=batch_size)
-        self.log("test/smape", self.test_smape, on_step=False, on_epoch=True, 
-                 prog_bar=False, logger=True, batch_size=batch_size)
-        self.log("test/mape", self.test_mape, on_step=False, on_epoch=True, 
-                 prog_bar=False, logger=True, batch_size=batch_size)
-        self.log("test/crps", self.test_crps, on_step=False, on_epoch=True, 
-                 prog_bar=False, logger=True, batch_size=batch_size)
-        self.log(f"test/coverage-{self.test_coverage.level}", self.val_coverage, on_step=False, on_epoch=True, 
-                 prog_bar=False, logger=True, batch_size=batch_size)
-        
-
-class GeneralAnyQuantileForecaster(AnyQuantileForecaster):
-    def __init__(self, cfg):
-        super().__init__(cfg)
-        
-        self.time_series_projection_in = torch.nn.Linear(1, cfg.model.nn.backbone.d_model)
-        self.time_series_projection_out = torch.nn.Linear(cfg.model.nn.backbone.d_model, 1)
-        self.shortcut = torch.nn.Linear(cfg.model.nn.backbone.size_in, cfg.model.nn.backbone.size_out)
-        
-        self.time_embedding = torch.nn.Embedding(self.cfg.model.nn.backbone.size_in + self.cfg.model.nn.backbone.size_out, 
-                                                 cfg.model.nn.backbone.embed_dim)
-        
-    def shared_forward(self, x):
-        history = x['history'][:, -self.cfg.model.input_horizon_len:]
-        q = x['quantiles']
-        
-        x_max = torch.abs(history).max(dim=-1, keepdims=True)[0]
-        if self.cfg.model.max_norm:
-            x_max[x_max == 0] = 1
-        else:
-            # If norm is disabled, set all values to 1
-            x_max[x_max >= 0] = 1
-        history = history / x_max
-        
-        t_h = torch.arange(self.cfg.model.input_horizon_len, dtype=torch.int64)[None].to(history.device)
-        t_f = torch.arange(self.cfg.model.nn.backbone.size_out, dtype=torch.int64)[None].to(history.device) + self.cfg.model.nn.backbone.size_in
-        
-        time_features_tgt = torch.repeat_interleave(self.time_embedding(t_f), repeats=history.shape[0], dim=0)
-        time_features_src = self.time_embedding(t_h)
-        
-        xf_input = time_features_tgt
-        xt_input = time_features_src + self.time_series_projection_in(history.unsqueeze(-1))
-        xs_input = q
-        
-        backbone_output = self.backbone(xt_input=xt_input, xf_input=xf_input, xs_input=xs_input) 
-        backbone_output = self.time_series_projection_out(backbone_output)
-        
-        forecast = backbone_output[..., 0] + history.mean(dim=-1, keepdims=True)[..., None] + self.shortcut(history)[..., None]
-        
-        return {'forecast': forecast * x_max[..., None], 'quantiles': q}
-    
-    
-    
 class GeneralForecaster(MlpForecaster):
     def __init__(self, cfg):
         super().__init__(cfg)
-        
         self.time_series_projection_in = torch.nn.Linear(1, cfg.model.nn.backbone.d_model)
         self.time_series_projection_out = torch.nn.Linear(cfg.model.nn.backbone.d_model, 1)
         self.shortcut = torch.nn.Linear(cfg.model.nn.backbone.size_in, cfg.model.nn.backbone.size_out)
-        
-        # 100 includes 31 days, 12 months and 7 days of week
         self.time_embedding = torch.nn.Embedding(2000, cfg.model.nn.embedding_dim)
-        # this includes 0 as no deal and deal types 1,2,3
         self.time_series_id = torch.nn.Embedding(cfg.model.nn.time_series_id_num, cfg.model.nn.embedding_dim)
         
     def shared_forward(self, x):
@@ -426,8 +346,3 @@ class GeneralForecaster(MlpForecaster):
     def forward(self, x):
         out = self.shared_forward(x)
         return out['forecast']
-    
-    
-    
-    
-    

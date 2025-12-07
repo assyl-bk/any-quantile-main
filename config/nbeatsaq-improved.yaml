@@ -1,0 +1,139 @@
+# Improved N-BEATS Any-Quantile Configuration (Baseline First)
+# Start with baseline settings matching the paper, then enable improvements
+
+logging.path: "./logs/${dataset.name}"
+# Shorten run name to avoid Windows MAX_PATH issues when creating TensorBoard logs.
+# Avoid Python expressions in interpolation for OmegaConf compatibility.
+logging.name: "nbeatsaq-${model.nn.backbone._target_}-h${dataset.history_length}-o${dataset.horizon_length}-lr${model.optimizer.lr}-w${model.nn.backbone.layer_width}-L${model.nn.backbone.num_layers}-B${model.nn.backbone.num_blocks}-s${random.seed}"
+
+# ============================================================================
+# DATASET CONFIGURATION (Matching Paper Table 2)
+# ============================================================================
+dataset._target_: dataset.ElectricityUnivariateDataModule
+dataset.name: "MHLV"
+dataset.num_workers: 4
+dataset.persistent_workers: True
+dataset.train_batch_size: 1024
+dataset.eval_batch_size: 1024
+dataset.horizon_length: 48
+dataset.history_length: 168
+# Paper uses: train 2006-2016, val 2017, test 2018
+dataset.split_boundaries: ['2006-01-01', '2017-01-01', '2018-01-01', '2019-01-01']
+dataset.fillna: 'ffill'
+dataset.train_step: 1
+dataset.eval_step: 24
+
+# ============================================================================
+# RANDOM SEED (8 seeds for ensemble as in paper)
+# ============================================================================
+random.seed: !!python/tuple [0,1,2,3,4,5,6,7]
+
+# ============================================================================
+# TRAINER CONFIGURATION (Matching Paper Section 6.4)
+# ============================================================================
+trainer.max_epochs: 15
+trainer.check_val_every_n_epoch: 1
+trainer.log_every_n_steps: 100
+trainer.devices: 1
+trainer.accelerator: 'gpu'
+trainer.fast_dev_run: False
+trainer.limit_train_batches: null
+trainer.limit_val_batches: null
+
+# ============================================================================
+# CHECKPOINT CONFIGURATION
+# ============================================================================
+checkpoint.resume_ckpt: null
+checkpoint.save_top_k: 5
+checkpoint.ckpt_path: null
+
+# ============================================================================
+# MODEL CONFIGURATION
+# ============================================================================
+# START WITH BASELINE: Use standard AnyQuantileForecaster first
+# Then switch to AnyQuantileForecasterWithMonotonicity after baseline works
+model._target_: model.AnyQuantileForecaster
+# model._target_: model.AnyQuantileForecasterWithMonotonicity  # Enable after baseline works
+
+model.input_horizon_len: "${dataset.history_length}"
+
+# Monotonicity settings (only used if AnyQuantileForecasterWithMonotonicity is enabled)
+model.use_monotonicity_loss: False  # Start False for baseline
+model.monotone_weight: 0.1
+model.monotone_margin: 0.0
+model.num_train_quantiles: 1  # Start with 1 for baseline, increase to 5-9 after
+
+# ============================================================================
+# LOSS FUNCTION (Matching Paper Table 2 and Section 6.4)
+# ============================================================================
+model.loss._target_: losses.MQNLoss
+
+# ============================================================================
+# NORMALIZATION (Critical for preventing NaN - see Paper Table 5)
+# ============================================================================
+# Paper Table 5 shows AQ-NBEATS-FiLM works best WITHOUT max_norm (checkmark in MQN column)
+model.max_norm: False
+
+# ============================================================================
+# QUANTILE SAMPLING STRATEGY (Matching Paper Section 5.2)
+# ============================================================================
+model.q_sampling: 'random_in_batch'
+model.q_distribution: 'uniform'  # Paper uses uniform for N-BEATS
+model.q_parameter: 0.3  # Only used if q_distribution is 'beta'
+
+# ============================================================================
+# BACKBONE ARCHITECTURE (Matching Paper Table 2 and Section 6.4)
+# ============================================================================
+# Paper Table 5 shows AQ-NBEATS-FiLM is most accurate
+model.nn.backbone._target_: modules.NBEATSAQFILM
+# Alternative options to try:
+# model.nn.backbone._target_: modules.NBEATSAQCAT
+# model.nn.backbone._target_: modules.NBEATSAQOUT
+
+model.nn.backbone.dropout: 0.0
+model.nn.backbone.layer_width: 1024    # Paper uses 1024
+model.nn.backbone.num_layers: 3        # Paper uses 3
+model.nn.backbone.num_blocks: 30       # Paper uses 30
+model.nn.backbone.share: False         # Paper uses False
+model.nn.backbone.size_in: "${dataset.history_length}"
+model.nn.backbone.size_out: "${dataset.horizon_length}"
+model.nn.backbone.quantile_embed_dim: 64
+model.nn.backbone.quantile_embed_num: 100
+
+# ============================================================================
+# OPTIMIZER CONFIGURATION (Matching Paper Section 6.4)
+# ============================================================================
+model.optimizer._target_: torch.optim.Adam
+model.optimizer.lr: 0.0005
+
+# ============================================================================
+# SCHEDULER CONFIGURATION (Matching Paper Section 6.4)
+# ============================================================================
+model.scheduler._target_: schedulers.InverseSquareRoot
+model.scheduler.warmup_updates: 400
+model.scheduler.warmup_end_lr: "${model.optimizer.lr}"
+
+# ============================================================================
+# USAGE INSTRUCTIONS
+# ============================================================================
+# Step 1: Run baseline to verify no NaN issues
+#   python run.py --config=config/nbeats-improved.yaml
+#
+# Step 2: After baseline works, enable improvements:
+#   - Change model._target_ to model.AnyQuantileForecasterWithMonotonicity
+#   - Set model.use_monotonicity_loss: True
+#   - Set model.num_train_quantiles: 9
+#   - Optionally try model.max_norm: True (see Table 5 ablation)
+#   - Optionally try model.q_distribution: 'beta' (see ESRNN approach)
+#
+# Step 3: Try different backbone variants (Table 5):
+#   - modules.NBEATSAQFILM (best accuracy, highest compute)
+#   - modules.NBEATSAQOUT (good accuracy, best compute efficiency)
+#   - modules.NBEATSAQCAT (requires max_norm: True)
+#
+# Expected Results (Paper Table 3):
+#   - CRPS: ~211.22
+#   - N-CRPS: ~1.84
+#   - MAPE: ~2.47%
+#   - Coverage-0.95: ~0.945-0.955
+# ============================================================================
