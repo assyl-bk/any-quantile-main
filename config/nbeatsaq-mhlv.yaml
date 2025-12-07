@@ -20,7 +20,7 @@ trainer.max_epochs: 15
 trainer.check_val_every_n_epoch: 1
 trainer.log_every_n_steps: 100
 trainer.devices: 1
-trainer.accelerator: 'gpu'
+trainer.accelerator: 'cpu'
 trainer.fast_dev_run: False
 trainer.limit_train_batches: null
 trainer.limit_val_batches: null
@@ -34,6 +34,7 @@ model.input_horizon_len: "${dataset.history_length}"
 model.loss._target_: losses.MQNLoss
 model.max_norm: True
 model.q_sampling: 'random_in_batch'
+model.q_distribution: 'uniform'
 
 model.nn.backbone._target_: modules.NBEATSAQCAT
 # NBEATSAQCAT NBEATSAQOUT NBEATSAQFILM 
