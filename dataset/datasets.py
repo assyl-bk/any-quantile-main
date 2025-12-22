@@ -14,10 +14,9 @@ import torch
 import bisect
 
 import subprocess
+import shutil
 from glob import glob
 import logging
-import shutil
-import zipfile
 
 import contextlib
 
@@ -204,35 +203,50 @@ class ElectricityUnivariateDataModule(pl.LightningDataModule):
     def prepare_data():
         logger.info("Downloading datasets")
         datasets_path = "data/electricity/datasets/"
-        datasets_root = pathlib.Path(datasets_path)
-        datasets_root.mkdir(parents=True, exist_ok=True)
-
-        # If data is already present locally, skip download to avoid external deps (gsutil/unzip).
-        existing_csvs = list(datasets_root.glob("**/df_y.csv"))
-        if len(existing_csvs) > 0:
-            logger.info("Found local dataset files, skipping download.")
-            return
-
-        # Require gsutil only when data is missing.
-        if shutil.which("gsutil") is None:
-            raise FileNotFoundError(
-                "gsutil not found. Install Google Cloud SDK or place datasets under data/electricity/datasets."
-            )
-
-        proc = subprocess.run(["gsutil", "-m", "rsync", "gs://electricity-datasets", datasets_path],
-                              capture_output=True)
-        logger.info(proc.stderr.decode())
+        pathlib.Path(datasets_path).mkdir(parents=True, exist_ok=True)
+        # If datasets are already present, skip download
         datasets = glob(os.path.join(datasets_path, "*.zip"))
+        if len(datasets) == 0:
+            # Try to use gsutil if available
+            gsutil_path = shutil.which("gsutil")
+            if gsutil_path is None:
+                msg = (
+                    "gsutil is not installed or not on PATH. The script attempted to download datasets to "
+                    f"'{datasets_path}' but found no .zip files.\n"
+                    "Options:\n"
+                    "  1) Install the Google Cloud SDK (gsutil) and re-run the script. On Debian/Ubuntu: 'sudo apt-get install -y google-cloud-sdk' or follow https://cloud.google.com/sdk/docs/install.\n"
+                    "  2) Manually download the datasets archive and place the .zip files under 'data/electricity/datasets/'.\n"
+                    "  3) If you have gsutil but it's not on PATH, ensure it's available to the environment running Python.\n"
+                )
+                logger.error(msg)
+                raise RuntimeError(msg)
 
-        logger.info("Unzipping datasets")
-        for d in datasets:
             try:
-                with zipfile.ZipFile(d, "r") as zf:
-                    zf.extractall(datasets_path)
-            except zipfile.BadZipFile:
-                # Fall back to system unzip if the file is not a valid zip; this keeps legacy behavior.
-                proc = subprocess.run(["unzip", "-u", d], capture_output=True)
-                logger.info(proc.stdout.decode())
+                proc = subprocess.run([gsutil_path, "-m", "rsync", "gs://electricity-datasets", datasets_path],
+                                      capture_output=True, check=True)
+                # gsutil writes progress to stderr
+                logger.info(proc.stderr.decode(errors='ignore'))
+            except subprocess.CalledProcessError as e:
+                logger.error("gsutil failed to sync datasets: %s", e)
+                logger.error("stdout: %s", e.stdout.decode(errors='ignore') if e.stdout else "")
+                logger.error("stderr: %s", e.stderr.decode(errors='ignore') if e.stderr else "")
+                raise
+            datasets = glob(os.path.join(datasets_path, "*.zip"))
+
+        if len(datasets) > 0:
+            logger.info("Unzipping datasets")
+            for d in datasets:
+                try:
+                    proc = subprocess.run(["unzip", "-u", d], capture_output=True, check=True)
+                    logger.info(proc.stdout.decode(errors='ignore'))
+                except FileNotFoundError:
+                    logger.error("'unzip' command not found. Please install unzip or extract %s manually.", d)
+                    raise
+                except subprocess.CalledProcessError as e:
+                    logger.error("Failed to unzip %s: %s", d, e)
+                    logger.error("stdout: %s", e.stdout.decode(errors='ignore') if e.stdout else "")
+                    logger.error("stderr: %s", e.stderr.decode(errors='ignore') if e.stderr else "")
+                    raise
 
     def setup(self, stage: str):
         # Assign train/val datasets for use in dataloaders
@@ -596,63 +610,3 @@ class LongHorizonUnivariateDataModule(pl.LightningDataModule):
                           shuffle=False, pin_memory=True, 
                           persistent_workers=self.persistent_workers,
                           num_workers=self.num_workers, collate_fn=collate_fn_flat_deal)
-class ElectricityWithExogDataset(ElectricityUnivariateDataset):
-    """Extended dataset with exogenous features support"""
-    def __init__(
-        self,
-        name: str,
-        split: str,
-        exog_features: List[str] = ['temperature', 'humidity'],
-        calendar_features: bool = True,
-        **kwargs
-    ):
-        super().__init__(name, split, **kwargs)
-        
-        self.exog_features = exog_features
-        self.calendar_features = calendar_features
-
-        # Load exogenous data (aligned with time series)
-        if self.exog_features:
-            exog_path = f'./data/exogenous/{name.lower()}_weather.csv'
-            self.exog_df = pd.read_csv(exog_path, parse_dates=['ds'])
-            self.exog_df = self.exog_df.set_index('ds')
-        else:
-            self.exog_df = None
-
-    def _get_calendar_features(self, timestamps):
-        """Generate calendar embeddings"""
-        hour = timestamps.hour / 24.0
-        dow = timestamps.dayofweek / 7.0
-        month = (timestamps.month - 1) / 12.0
-        is_weekend = (timestamps.dayofweek >= 5).astype(float)
-
-        return np.stack([hour, dow, month, is_weekend], axis=-1)
-
-    def __getitem__(self, index):
-        # Base item (contains history & target)
-        item = super().__getitem__(index)
-
-        # Extract window start from parent class
-        window_idx = item["window_start"]   # Make sure this exists in parent
-
-        # Get timestamps for this window
-        window_times = self.series_timestamps[
-            window_idx : window_idx + self.tot_window_len
-        ]
-
-        # ---------------------------
-        # Add exogenous features
-        # ---------------------------
-        if self.exog_features and self.exog_df is not None:
-            exog = self.exog_df.loc[window_times][self.exog_features].values
-            
-            item['exog_history'] = exog[: self.history_length].astype(np.float32)
-            item['exog_future'] = exog[self.history_length :].astype(np.float32)
-
-        # ---------------------------
-        # Add calendar features
-        # ---------------------------
-        if self.calendar_features:
-            item['calendar'] = self._get_calendar_features(window_times)
-
-        return item

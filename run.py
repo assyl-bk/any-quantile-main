@@ -7,6 +7,16 @@ import os
 import random
 import logging
 import torch
+import numpy as np
+
+# Compatibility shim for NumPy 2.0 where np.string_ / np.unicode_ were removed.
+# Some downstream packages (tensorboard / tensorflow-stub) still reference these
+# attributes. Define them here if missing to avoid AttributeError at import/runtime.
+if not hasattr(np, "string_"):
+    np.string_ = np.bytes_
+if not hasattr(np, "unicode_"):
+    # np.unicode_ historically matched Python's native str type
+    np.unicode_ = np.str_
 
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -24,12 +34,6 @@ def run(cfg_yaml):
     cfg = OmegaConf.create(cfg)
     
     print(OmegaConf.to_yaml(cfg))
-
-    # Fallback to CPU if CUDA is unavailable even when config requests GPU.
-    if (cfg.trainer.get("accelerator") == "gpu") and (not torch.cuda.is_available()):
-        cfg.trainer.accelerator = "cpu"
-        cfg.trainer.devices = 1
-        logging.warning("CUDA not available; overriding trainer.accelerator to 'cpu'.")
     
     logger = TensorBoardLogger(save_dir=cfg.logging.path, version=cfg.logging.name, name="")    
     
