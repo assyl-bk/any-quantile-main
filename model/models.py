@@ -462,7 +462,53 @@ class GeneralForecaster(MlpForecaster):
         out = self.shared_forward(x)
         return out['forecast']
     
+class AnyQuantileForecasterWithMonotonicity(AnyQuantileForecaster):
+    """Extended forecaster with monotonicity loss"""
     
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.monotonicity_loss = MonotonicityLoss(margin=cfg.model.monotone_margin)
+        self.monotone_weight = cfg.model.monotone_weight  # e.g., 0.1
+    
+    def training_step(self, batch, batch_idx):
+        batch_size = batch['history'].shape[0]
+        
+        # Sample MULTIPLE quantiles per sample for monotonicity training
+        num_quantiles = self.cfg.model.num_train_quantiles  # e.g., 9
+        
+        if self.cfg.model.q_distribution == 'uniform':
+            # Sample sorted quantiles
+            q = torch.rand(batch_size, num_quantiles, device=batch['history'].device)
+            q, _ = q.sort(dim=-1)  # Ensure sorted for monotonicity
+        elif self.cfg.model.q_distribution == 'fixed':
+            # Use fixed quantile grid
+            q = torch.linspace(0.1, 0.9, num_quantiles, device=batch['history'].device)
+            q = q.unsqueeze(0).expand(batch_size, -1)
+        else:
+            raise ValueError(f"Unknown q_distribution: {self.cfg.model.q_distribution}")
+        
+        batch['quantiles'] = q
+        
+        # Forward pass - now predicts multiple quantiles
+        net_output = self.shared_forward(batch)
+        y_hat = net_output['forecast']  # [B, H, Q]
+        quantiles = net_output['quantiles']  # [B, Q]
+        
+        # Pinball loss (main training objective)
+        pinball_loss = self.loss(y_hat, batch['target'], q=quantiles[:, None, :])
+        
+        # Monotonicity loss (regularization)
+        monotone_loss = self.monotonicity_loss(y_hat, quantiles)
+        
+        # Combined loss
+        total_loss = pinball_loss + self.monotone_weight * monotone_loss
+        
+        # Logging
+        self.log("train/pinball_loss", pinball_loss, prog_bar=True)
+        self.log("train/monotone_loss", monotone_loss, prog_bar=True)
+        self.log("train/total_loss", total_loss, prog_bar=True)
+        
+        return total_loss
     
     
     

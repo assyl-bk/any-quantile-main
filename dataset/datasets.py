@@ -17,6 +17,7 @@ import subprocess
 import shutil
 from glob import glob
 import logging
+import zipfile
 
 import contextlib
 
@@ -237,15 +238,17 @@ class ElectricityUnivariateDataModule(pl.LightningDataModule):
             logger.info("Unzipping datasets")
             for d in datasets:
                 try:
-                    proc = subprocess.run(["unzip", "-u", d], capture_output=True, check=True)
-                    logger.info(proc.stdout.decode(errors='ignore'))
-                except FileNotFoundError:
-                    logger.error("'unzip' command not found. Please install unzip or extract %s manually.", d)
+                    # Use Python's zipfile module for cross-platform compatibility
+                    with zipfile.ZipFile(d, 'r') as zip_ref:
+                        # Extract to the same directory as the zip file
+                        extract_path = os.path.dirname(d)
+                        zip_ref.extractall(extract_path)
+                        logger.info(f"Extracted {d} to {extract_path}")
+                except zipfile.BadZipFile as e:
+                    logger.error("Failed to unzip %s: %s (not a valid zip file)", d, e)
                     raise
-                except subprocess.CalledProcessError as e:
+                except Exception as e:
                     logger.error("Failed to unzip %s: %s", d, e)
-                    logger.error("stdout: %s", e.stdout.decode(errors='ignore') if e.stdout else "")
-                    logger.error("stderr: %s", e.stderr.decode(errors='ignore') if e.stderr else "")
                     raise
 
     def setup(self, stage: str):

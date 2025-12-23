@@ -47,6 +47,13 @@ def run(cfg_yaml):
                                           mode="max", filename="model-{epoch}")
     
     pl.seed_everything(cfg.random.seed, workers=True)
+    
+    # Fallback to CPU if CUDA is unavailable even when config requests GPU
+    if cfg.trainer.get("accelerator") == "gpu" and not torch.cuda.is_available():
+        cfg.trainer.accelerator = "cpu"
+        cfg.trainer.devices = 1
+        logging.warning("CUDA not available; overriding trainer.accelerator to 'cpu'.")
+    
     trainer = pl.Trainer(**cfg.trainer, logger=logger,
                          callbacks=[lr_monitor, checkpoint_callback])
     
