@@ -1,0 +1,68 @@
+model:
+  _target_: model.AnyQuantileForecaster  # Changed from models_exog.AnyQuantileForecasterExog
+  nn:
+    backbone:
+      _target_: modules.NBEATSAQCAT  # Changed from NBEATSEXOG
+      num_blocks: 30
+      num_layers: 3
+      layer_width: 1024
+      share: false
+      size_in: 168
+      size_out: 24
+      dropout: 0.0
+      quantile_embed_dim: 64
+      quantile_embed_num: 100
+  
+  input_horizon_len: 168
+  loss:
+    _target_: losses.MQNLoss
+  q_sampling: random_in_batch
+  q_distribution: uniform
+  q_parameter: 0.3
+  max_norm: false
+  
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 0.0001
+    weight_decay: 0.00001
+  
+  scheduler:
+    _target_: schedulers.InverseSquareRoot
+    warmup_updates: 400
+    warmup_end_lr: 0.0005
+
+dataset:
+  _target_: dataset.EMHIRESUnivariateDataModule  # Changed from ElectricityWithExogDataModule
+  name: MHLV
+  train_batch_size : 2048 
+  eval_batch_size: 2048
+  num_workers: 4
+  persistent_workers: false
+  split_boundaries: ['2006-01-01', '2017-12-30', '2018-01-01', '2019-01-01']
+  history_length: 168
+  horizon_length: 24
+  fillna: 'ffill'
+  train_step: 1
+  eval_step: 24
+  # Removed exog_features and calendar_features
+trainer:
+  max_epochs: 15
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 100
+  devices: 1
+  accelerator: gpu
+  precision: 32
+  gradient_clip_val: 0.5
+logging:
+  path: lightning_logs
+  name: nbeatsaq-exog
+
+checkpoint:
+  save_top_k: 2
+  ckpt_path: null
+  resume_ckpt: last
+random.seed: !!python/tuple [0,1,2,3,4,5,6,7]
+
+#random:
+#seed: 0
+# To run: python run.py --config=config/nbeatsaq-exog.yaml

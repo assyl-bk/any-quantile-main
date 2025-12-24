@@ -1,0 +1,74 @@
+#for monotonicty constraint in N-BEATS Any-Quantile forecaster
+model:
+  _target_: model.AnyQuantileForecasterWithMonotonicity  # New class with monotonicity
+  nn:
+    backbone:
+      _target_: modules.NBEATSAQCAT
+      num_blocks: 30
+      num_layers: 3
+      layer_width: 1024
+      share: false
+      size_in: 168
+      size_out: 24
+      dropout: 0.0
+      quantile_embed_dim: 64
+      quantile_embed_num: 100
+  
+  input_horizon_len: 168
+  loss:
+    _target_: losses.MQNLoss
+  q_sampling: random_in_batch
+  q_distribution: uniform  # Can be 'uniform' or 'fixed'
+  q_parameter: 0.3
+  max_norm: false
+  
+  # NEW: Monotonicity parameters
+  monotone_weight: 0.1  # Weight for monotonicity loss (adjust between 0.01-1.0)
+  monotone_margin: 0.01  # Margin for monotonicity constraint
+  num_train_quantiles: 9  # Number of quantiles to predict during training
+  
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 0.0001
+    weight_decay: 0.00001
+  
+  scheduler:
+    _target_: schedulers.InverseSquareRoot
+    warmup_updates: 400
+    warmup_end_lr: 0.0005
+
+dataset:
+  _target_: dataset.EMHIRESUnivariateDataModule
+  name: MHLV
+  train_batch_size: 2048
+  eval_batch_size: 2048
+  num_workers: 4
+  persistent_workers: false
+  split_boundaries: ['2006-01-01', '2017-12-30', '2018-01-01', '2019-01-01']
+  history_length: 168
+  horizon_length: 24
+  fillna: 'ffill'
+  train_step: 1
+  eval_step: 24
+
+trainer:
+  max_epochs: 15
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 100
+  devices: 1
+  accelerator: gpu
+  precision: 32
+  gradient_clip_val: 0.5
+
+logging:
+  path: lightning_logs
+  name: nbeatsaq-monotone
+
+checkpoint:
+  save_top_k: 2
+  ckpt_path: null
+  resume_ckpt: null  # Start from scratch for monotonicity training
+
+random.seed: !!python/tuple [0,1,2,3,4,5,6,7]
+
+# To run: python run.py --config=config/nbeatsaq-monotone.yaml
